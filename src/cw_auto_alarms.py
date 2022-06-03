@@ -133,15 +133,11 @@ metric_dimensions_map = {
 
 
 def lambda_handler(event, context):
-    logger.info('event received: {}'.format(event))
+    logger.info(f'event received: {event}')
     try:
         if 'source' in event and event['source'] == 'aws.ec2' and event['detail']['state'] == 'running':
             instance_id = event['detail']['instance-id']
-            # determine if instance is tagged to create an alarm
-            instance_info = check_alarm_tag(instance_id, create_alarm_tag)
-
-            # instance has been tagged for alarming, confirm an alarm doesn't already exist
-            if instance_info:
+            if instance_info := check_alarm_tag(instance_id, create_alarm_tag):
                 process_alarm_tags(instance_id, instance_info, default_alarms, metric_dimensions_map, sns_topic_arn,
                                    cw_namespace, create_default_alarms_flag, alarm_separator)
         elif 'source' in event and event['source'] == 'aws.ec2' and event['detail']['state'] == 'terminated':
@@ -150,14 +146,16 @@ def lambda_handler(event, context):
         elif 'source' in event and event['source'] == 'aws.lambda' and event['detail'][
             'eventName'] == 'TagResource20170331v2':
             logger.debug(
-                'Tag Lambda Function event occurred, tags are: {}'.format(event['detail']['requestParameters']['tags']))
+                f"Tag Lambda Function event occurred, tags are: {event['detail']['requestParameters']['tags']}"
+            )
+
             tags = event['detail']['requestParameters']['tags']
             function = event['detail']['requestParameters']['resource'].split(":")[-1]
             process_lambda_alarms(function, tags, create_alarm_tag, default_alarms, sns_topic_arn, alarm_separator)
         elif 'source' in event and event['source'] == 'aws.lambda' and event['detail'][
             'eventName'] == 'DeleteFunction20150331':
             function = event['detail']['requestParameters']['functionName']
-            logger.debug('Delete Lambda Function event occurred for: {}'.format(function))
+            logger.debug(f'Delete Lambda Function event occurred for: {function}')
             result = delete_alarms(function)
         elif  'action' in event and event['action'] == 'scan':
             logger.debug(
@@ -169,5 +167,5 @@ def lambda_handler(event, context):
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail the job and log the exception message.
-        logger.error('Failure creating alarm: {}'.format(e))
+        logger.error(f'Failure creating alarm: {e}')
         raise

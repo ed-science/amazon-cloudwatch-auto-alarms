@@ -18,21 +18,17 @@ def boto3_client(resource, assumed_credentials=None):
             max_attempts=40
         )
     )
-    if assumed_credentials:
-        client = boto3.client(
+    return (
+        boto3.client(
             resource,
             aws_access_key_id=assumed_credentials['AccessKeyId'],
             aws_secret_access_key=assumed_credentials['SecretAccessKey'],
             aws_session_token=assumed_credentials['SessionToken'],
-            config=config
+            config=config,
         )
-    else:
-        client = boto3.client(
-            resource,
-            config=config
-        )
-
-    return client
+        if assumed_credentials
+        else boto3.client(resource, config=config)
+    )
 
 
 def check_alarm_tag(instance_id, tag_key):
@@ -74,30 +70,26 @@ def check_alarm_tag(instance_id, tag_key):
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error('Failure describing instance {} with tag key: {} : {}'.format(instance_id, tag_key, e))
+        logger.error(
+            f'Failure describing instance {instance_id} with tag key: {tag_key} : {e}'
+        )
+
         raise
 
 
 def process_lambda_alarms(function_name, tags, activation_tag, default_alarms, sns_topic_arn, alarm_separator):
     activation_tag = tags.get(activation_tag, 'not_found')
     if activation_tag == 'not_found':
-        logger.debug('Activation tag not found for {}, nothing to do'.format(function_name))
+        logger.debug(f'Activation tag not found for {function_name}, nothing to do')
         return True
     else:
-        logger.debug('Processing function specific alarms for: {}'.format(default_alarms))
+        logger.debug(f'Processing function specific alarms for: {default_alarms}')
         for tag_key in tags:
             if tag_key.startswith('AutoAlarm'):
                 default_alarms['AWS/Lambda'].append({'Key': tag_key, 'Value': tags[tag_key]})
 
         # get the default dimensions for AWS/EC2
-        dimensions = list()
-        dimensions.append(
-            {
-                'Name': 'FunctionName',
-                'Value': function_name
-            }
-        )
-
+        dimensions = [{'Name': 'FunctionName', 'Value': function_name}]
         for tag in default_alarms['AWS/Lambda']:
             alarm_properties = tag['Key'].split(alarm_separator)
             Namespace = alarm_properties[1]
@@ -106,9 +98,8 @@ def process_lambda_alarms(function_name, tags, activation_tag, default_alarms, s
             Period = alarm_properties[4]
             Statistic = alarm_properties[5]
 
-            AlarmName = 'AutoAlarm-{}-{}-{}-{}-{}-{}'.format(function_name, Namespace, MetricName, ComparisonOperator,
-                                                             Period,
-                                                             Statistic)
+            AlarmName = f'AutoAlarm-{function_name}-{Namespace}-{MetricName}-{ComparisonOperator}-{Period}-{Statistic}'
+
             create_alarm(AlarmName, MetricName, ComparisonOperator, Period, tag['Value'], Statistic, Namespace,
                          dimensions, sns_topic_arn)
 
@@ -117,48 +108,51 @@ def create_alarm_from_tag(id, alarm_tag, instance_info, metric_dimensions_map, s
     alarm_properties = alarm_tag['Key'].split(alarm_separator)
     namespace = alarm_properties[1]
     MetricName = alarm_properties[2]
-    dimensions = list()
+    dimensions = []
     for dimension_name in metric_dimensions_map.get(namespace, list()):
-        dimension = dict()
+        dimension = {}
 
         if dimension_name == 'AutoScalingGroupName':
-            # find out if the instance is part of an autoscaling group
-            instance_asg = next(
-                (tag['Value'] for tag in instance_info['Tags'] if tag['Key'] == 'aws:autoscaling:groupName'), None)
-            if instance_asg:
+            if instance_asg := next(
+                (
+                    tag['Value']
+                    for tag in instance_info['Tags']
+                    if tag['Key'] == 'aws:autoscaling:groupName'
+                ),
+                None,
+            ):
                 dimension_value = instance_asg
                 dimension['Name'] = dimension_name
                 dimension['Value'] = dimension_value
                 dimensions.append(dimension)
+        elif dimension_value := instance_info.get(dimension_name, None):
+            dimension['Name'] = dimension_name
+            dimension['Value'] = dimension_value
+            dimensions.append(dimension)
         else:
-            dimension_value = instance_info.get(dimension_name, None)
-            if dimension_value:
-                dimension['Name'] = dimension_name
-                dimension['Value'] = dimension_value
-                dimensions.append(dimension)
-            else:
-                logger.warning(
-                    "Dimension {} has been specified in APPEND_DIMENSIONS but  no dimension value exists, skipping...".format(
-                        dimension_name))
+            logger.warning(
+                f"Dimension {dimension_name} has been specified in APPEND_DIMENSIONS but  no dimension value exists, skipping..."
+            )
 
-    logger.debug("dimensions are {}".format(dimensions))
 
-    additional_dimensions = list()
+    logger.debug(f"dimensions are {dimensions}")
 
-    for index, prop in enumerate(alarm_properties[3:], start=3):
-        if prop in valid_comparators:
-            prop_end_index = index
-            break
-    else:
-        prop_end_index = None
+    additional_dimensions = []
 
-    if prop_end_index:
+    if prop_end_index := next(
+        (
+            index
+            for index, prop in enumerate(alarm_properties[3:], start=3)
+            if prop in valid_comparators
+        ),
+        None,
+    ):
         additional_dimensions.extend(alarm_properties[3:prop_end_index])
     else:
-        logger.error('Unable to determine the dimensions for alarm tag: {}'.format(alarm_tag))
+        logger.error(f'Unable to determine the dimensions for alarm tag: {alarm_tag}')
         raise Exception
 
-    AlarmName = 'AutoAlarm-{}-{}-{}'.format(id, namespace, MetricName)
+    AlarmName = f'AutoAlarm-{id}-{namespace}-{MetricName}'
     properties_offset = 0
     if additional_dimensions:
         for num, dim in enumerate(additional_dimensions[::2]):
@@ -169,14 +163,14 @@ def create_alarm_from_tag(id, alarm_tag, instance_info, metric_dimensions_map, s
                     'Value': val
                 }
             )
-            AlarmName = AlarmName + '-{}-{}'.format(dim, val)
+            AlarmName = AlarmName + f'-{dim}-{val}'
             properties_offset = properties_offset + 2
 
     ComparisonOperator = alarm_properties[(properties_offset + 3)]
     Period = alarm_properties[(properties_offset + 4)]
     Statistic = alarm_properties[(properties_offset + 5)]
 
-    AlarmName = AlarmName + '-{}-{}-{}'.format(ComparisonOperator, Period, Statistic)
+    AlarmName = AlarmName + f'-{ComparisonOperator}-{Period}-{Statistic}'
 
     create_alarm(AlarmName, MetricName, ComparisonOperator, Period, alarm_tag['Value'], Statistic, namespace,
                  dimensions, sns_topic_arn)
@@ -187,11 +181,11 @@ def process_alarm_tags(instance_id, instance_info, default_alarms, metric_dimens
     tags = instance_info['Tags']
 
     ImageId = instance_info['ImageId']
-    logger.info('ImageId is: {}'.format(ImageId))
+    logger.info(f'ImageId is: {ImageId}')
     platform = determine_platform(ImageId)
 
-    logger.info('Platform is: {}'.format(platform))
-    custom_alarms = dict()
+    logger.info(f'Platform is: {platform}')
+    custom_alarms = {}
     # get all alarm tags from instance and add them into a custom tag list
     for instance_tag in tags:
         if instance_tag['Key'].startswith('AutoAlarm'):
@@ -218,31 +212,31 @@ def determine_platform(imageid):
 
         )
 
-        # can only be one instance when called by CloudWatch Events
-        if 'Images' in image_info and len(image_info['Images']) > 0:
-            platform_details = image_info['Images'][0]['PlatformDetails']
-            logger.debug('Platform details of image: {}'.format(platform_details))
-            if 'Windows' in platform_details or 'SQL Server' in platform_details:
-                return 'Windows'
-            elif 'Red Hat' in platform_details:
-                return 'Red Hat'
-            elif 'SUSE' in platform_details:
-                return 'SUSE'
-            elif 'Linux/UNIX' in platform_details:
-                if 'ubuntu' in image_info['Images'][0]['Description'].lower() or 'ubuntu' in image_info['Images'][0][
-                    'Name'].lower():
-                    return 'Ubuntu'
-                else:
-                    return 'Amazon Linux'
-            else:
-                return None
-        else:
+        if 'Images' not in image_info or len(image_info['Images']) <= 0:
             return None
 
+        platform_details = image_info['Images'][0]['PlatformDetails']
+        logger.debug(f'Platform details of image: {platform_details}')
+        if 'Windows' in platform_details or 'SQL Server' in platform_details:
+            return 'Windows'
+        elif 'Red Hat' in platform_details:
+            return 'Red Hat'
+        elif 'SUSE' in platform_details:
+            return 'SUSE'
+        elif 'Linux/UNIX' in platform_details:
+            return (
+                'Ubuntu'
+                if 'ubuntu' in image_info['Images'][0]['Description'].lower()
+                or 'ubuntu' in image_info['Images'][0]['Name'].lower()
+                else 'Amazon Linux'
+            )
+
+        else:
+            return None
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error('Failure describing image {}: {}'.format(imageid, e))
+        logger.error(f'Failure describing image {imageid}: {e}')
         raise
 
 
@@ -253,7 +247,7 @@ def convert_to_seconds(s):
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error('Error converting threshold string {} to seconds!'.format(s, e))
+        logger.error(f'Error converting threshold string {s} to seconds!')
         raise
 
 
@@ -269,7 +263,9 @@ def create_alarm(AlarmName, MetricName, ComparisonOperator, Period, Threshold, S
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
         logger.error(
-            'Error converting Period specified {} to seconds for Alarm {}!: {}'.format(Period, AlarmName, e))
+            f'Error converting Period specified {Period} to seconds for Alarm {AlarmName}!: {e}'
+        )
+
 
     Threshold = float(Threshold)
     try:
@@ -293,30 +289,29 @@ def create_alarm(AlarmName, MetricName, ComparisonOperator, Period, Threshold, S
 
         cw_client.put_metric_alarm(**alarm)
 
-        logger.info('Created alarm {}'.format(AlarmName))
+        logger.info(f'Created alarm {AlarmName}')
 
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error(
-            'Error creating alarm {}!: {}'.format(AlarmName, e))
+        logger.error(f'Error creating alarm {AlarmName}!: {e}')
 
 
 def delete_alarms(name):
     try:
-        AlarmNamePrefix = "AutoAlarm-{}".format(name)
+        AlarmNamePrefix = f"AutoAlarm-{name}"
         cw_client = boto3_client('cloudwatch')
-        logger.info('calling describe alarms with prefix {}'.format(AlarmNamePrefix))
+        logger.info(f'calling describe alarms with prefix {AlarmNamePrefix}')
         response = cw_client.describe_alarms(
             AlarmNamePrefix=AlarmNamePrefix,
         )
         alarm_list = []
-        logger.info('Response from describe_alarms(): {}'.format(response))
+        logger.info(f'Response from describe_alarms(): {response}')
         if 'MetricAlarms' in response:
             for alarm in response['MetricAlarms']:
                 alarm_name = alarm['AlarmName']
                 alarm_list.append(alarm_name)
-        logger.info('deleting {} for {}'.format(alarm_list, name))
+        logger.info(f'deleting {alarm_list} for {name}')
         response = cw_client.delete_alarms(
             AlarmNames=alarm_list
         )
@@ -324,8 +319,7 @@ def delete_alarms(name):
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error(
-            'Error deleting alarms for {}!: {}'.format(name, e))
+        logger.error(f'Error deleting alarms for {name}!: {e}')
 
 def scan_and_process_alarm_tags(create_alarm_tag, default_alarms, metric_dimensions_map, sns_topic_arn,
                                    cw_namespace, create_default_alarms_flag, alarm_separator):
@@ -343,5 +337,5 @@ def scan_and_process_alarm_tags(create_alarm_tag, default_alarms, metric_dimensi
     except Exception as e:
         # If any other exceptions which we didn't expect are raised
         # then fail and log the exception message.
-        logger.error('Failure describing reservations : {}'.format(e))
+        logger.error(f'Failure describing reservations : {e}')
         raise
